@@ -187,16 +187,15 @@ def get_google_drive_config():
     return dict(service_account), folder_id
 
 
-def upload_file_to_google_drive(file_path, file_name):
+def get_google_drive_service():
     service_account, folder_id = get_google_drive_config()
 
     if not service_account or not folder_id:
-        return None
+        return None, None
 
     try:
         from google.oauth2.service_account import Credentials
         from googleapiclient.discovery import build
-        from googleapiclient.http import MediaFileUpload
 
         credentials = Credentials.from_service_account_info(
             service_account,
@@ -209,6 +208,22 @@ def upload_file_to_google_drive(file_path, file_name):
             credentials=credentials,
             cache_discovery=False
         )
+
+        return drive_service, folder_id
+
+    except Exception as e:
+        st.warning(f"Google Drive connection failed: {e}")
+        return None, None
+
+
+def upload_file_to_google_drive(file_path, file_name):
+    drive_service, folder_id = get_google_drive_service()
+
+    if not drive_service or not folder_id:
+        return None
+
+    try:
+        from googleapiclient.http import MediaFileUpload
 
         metadata = {
             "name": file_name,
@@ -240,15 +255,80 @@ def upload_file_to_google_drive(file_path, file_name):
         st.warning(f"Google Drive upload failed for {file_name}: {e}")
         return None
 
-# Auto cleanup old files (7 days)
-MAX_FILE_AGE = 7 * 24 * 60 * 60
 
-for file in os.listdir(UPLOAD_DIR):
-    path = os.path.join(UPLOAD_DIR, file)
+def list_google_drive_files():
+    drive_service, folder_id = get_google_drive_service()
 
-    if os.path.isfile(path):
-        if time.time() - os.path.getmtime(path) > MAX_FILE_AGE:
-            os.remove(path)
+    if not drive_service or not folder_id:
+        return []
+
+    try:
+        query = (
+            f"'{folder_id}' in parents and trashed = false "
+            "and name contains '.xlsx'"
+        )
+
+        response = (
+            drive_service.files()
+            .list(
+                q=query,
+                fields="files(id, name, modifiedTime)",
+                orderBy="modifiedTime desc"
+            )
+            .execute()
+        )
+
+        return response.get("files", [])
+
+    except Exception as e:
+        st.warning(f"Could not list Google Drive files: {e}")
+        return []
+
+
+def download_google_drive_file(file_id, file_name):
+    drive_service, _ = get_google_drive_service()
+
+    if not drive_service:
+        return None
+
+    try:
+        from googleapiclient.http import MediaIoBaseDownload
+
+        path = os.path.join(UPLOAD_DIR, file_name)
+        request = drive_service.files().get_media(fileId=file_id)
+
+        with open(path, "wb") as f:
+            downloader = MediaIoBaseDownload(f, request)
+            done = False
+
+            while not done:
+                _, done = downloader.next_chunk()
+
+        return path
+
+    except Exception as e:
+        st.warning(f"Could not download {file_name} from Google Drive: {e}")
+        return None
+
+
+def delete_google_drive_file(file_name):
+    drive_service, _ = get_google_drive_service()
+
+    if not drive_service:
+        return False
+
+    try:
+        for file_info in list_google_drive_files():
+            if file_info.get("name") == file_name:
+                drive_service.files().delete(
+                    fileId=file_info["id"]
+                ).execute()
+                return True
+
+    except Exception as e:
+        st.warning(f"Could not delete {file_name} from Google Drive: {e}")
+
+    return False
 
 # =========================
 # EXPECTED HEADERS
@@ -335,11 +415,34 @@ def save_uploaded_file(uploaded_file):
 def list_saved_files():
     saved_paths = []
 
+    for file_info in list_google_drive_files():
+        file_name = file_info.get("name", "")
+
+        if file_name.lower().endswith(".xlsx"):
+            local_path = os.path.join(UPLOAD_DIR, file_name)
+
+            if not os.path.exists(local_path):
+                download_google_drive_file(file_info["id"], file_name)
+
     for file_name in os.listdir(UPLOAD_DIR):
         if file_name.lower().endswith(".xlsx"):
             saved_paths.append(os.path.join(UPLOAD_DIR, file_name))
 
     return sorted(saved_paths, key=os.path.getmtime, reverse=True)
+
+
+def delete_saved_file(file_name):
+    deleted = False
+    local_path = os.path.join(UPLOAD_DIR, file_name)
+
+    if os.path.exists(local_path):
+        os.remove(local_path)
+        deleted = True
+
+    if delete_google_drive_file(file_name):
+        deleted = True
+
+    return deleted
 
 
 def get_sheet_names(file_path):
@@ -638,6 +741,30 @@ def main():
             os.path.basename(path)
             for path in saved_paths
         ]
+
+        col_delete_select, col_delete_button = st.columns([3, 1])
+
+        with col_delete_select:
+            file_to_delete = st.selectbox(
+                "Delete saved file",
+                options=[""] + saved_file_names,
+                format_func=lambda value: value or "Choose file"
+            )
+
+        with col_delete_button:
+            st.write("")
+            st.write("")
+
+            if st.button(
+                "Delete",
+                disabled=not file_to_delete,
+                type="secondary"
+            ):
+                if delete_saved_file(file_to_delete):
+                    st.success(f"Deleted {file_to_delete}")
+                    st.rerun()
+                else:
+                    st.warning(f"Could not delete {file_to_delete}")
 
         selected_saved = st.multiselect(
             "Select saved files",
