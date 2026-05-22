@@ -103,6 +103,18 @@ def get_auth_config():
     if username and password:
         return username, password
 
+    username = get_secret_value("username")
+    password = get_secret_value("password")
+
+    if username and password:
+        return username, password
+
+    username = get_secret_value("USERNAME")
+    password = get_secret_value("PASSWORD")
+
+    if username and password:
+        return username, password
+
     return (
         os.environ.get("FAILURE_APP_USERNAME"),
         os.environ.get("FAILURE_APP_PASSWORD")
@@ -140,8 +152,8 @@ def require_login():
             "Streamlit secrets before sharing this app."
         )
         st.info(
-            "Use either [auth] username/password or AUTH_USERNAME "
-            "and AUTH_PASSWORD in Streamlit secrets, then reboot the app."
+            "Use [auth] username/password, AUTH_USERNAME/AUTH_PASSWORD, "
+            "or username/password in Streamlit secrets, then reboot the app."
         )
         st.stop()
 
