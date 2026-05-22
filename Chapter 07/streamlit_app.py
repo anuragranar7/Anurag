@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os
+import hmac
 import time
 from io import BytesIO
 from datetime import datetime
@@ -77,6 +78,68 @@ def get_secret_section(section_name):
         return st.secrets[section_name]
     except (FileNotFoundError, KeyError):
         return None
+
+
+def get_auth_config():
+    auth_settings = get_secret_section("auth")
+
+    if auth_settings:
+        return (
+            auth_settings.get("username"),
+            auth_settings.get("password")
+        )
+
+    return (
+        os.environ.get("FAILURE_APP_USERNAME"),
+        os.environ.get("FAILURE_APP_PASSWORD")
+    )
+
+
+def credentials_are_valid(username, password):
+    expected_username, expected_password = get_auth_config()
+
+    if not expected_username or not expected_password:
+        return False
+
+    return (
+        hmac.compare_digest(username, expected_username)
+        and hmac.compare_digest(password, expected_password)
+    )
+
+
+def require_login():
+    if st.session_state.get("authenticated"):
+        with st.sidebar:
+            if st.button("Log out"):
+                st.session_state["authenticated"] = False
+                st.rerun()
+        return True
+
+    st.title("Failure Detection & Analysis System")
+    st.subheader("Login")
+
+    expected_username, expected_password = get_auth_config()
+
+    if not expected_username or not expected_password:
+        st.error(
+            "Login is not configured. Add username and password in "
+            "Streamlit secrets before sharing this app."
+        )
+        st.stop()
+
+    with st.form("login_form"):
+        username = st.text_input("User ID")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Login")
+
+    if submitted:
+        if credentials_are_valid(username, password):
+            st.session_state["authenticated"] = True
+            st.rerun()
+
+        st.error("Invalid user ID or password.")
+
+    st.stop()
 
 
 def get_google_drive_config():
@@ -504,6 +567,8 @@ def create_monthly_analysis(df):
 # =========================
 
 def main():
+
+    require_login()
 
     st.title("🔍 Failure Detection & Analysis System")
 

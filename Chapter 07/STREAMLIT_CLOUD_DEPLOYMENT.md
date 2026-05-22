@@ -45,6 +45,10 @@ streamlit_app.py
 Paste this structure into Streamlit Cloud secrets, replacing the values with your Google service account JSON values and Drive folder ID:
 
 ```toml
+[auth]
+username = "YOUR_LOGIN_USER_ID"
+password = "YOUR_LOGIN_PASSWORD"
+
 [gdrive]
 folder_id = "YOUR_GOOGLE_DRIVE_FOLDER_ID"
 
