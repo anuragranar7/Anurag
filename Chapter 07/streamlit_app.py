@@ -76,7 +76,14 @@ UPLOAD_DIR = get_upload_dir()
 def get_secret_section(section_name):
     try:
         return st.secrets[section_name]
-    except (FileNotFoundError, KeyError):
+    except (FileNotFoundError, KeyError, AttributeError):
+        return None
+
+
+def get_secret_value(key):
+    try:
+        return st.secrets.get(key)
+    except (FileNotFoundError, AttributeError):
         return None
 
 
@@ -84,10 +91,17 @@ def get_auth_config():
     auth_settings = get_secret_section("auth")
 
     if auth_settings:
-        return (
-            auth_settings.get("username"),
-            auth_settings.get("password")
-        )
+        username = auth_settings.get("username")
+        password = auth_settings.get("password")
+
+        if username and password:
+            return username, password
+
+    username = get_secret_value("AUTH_USERNAME")
+    password = get_secret_value("AUTH_PASSWORD")
+
+    if username and password:
+        return username, password
 
     return (
         os.environ.get("FAILURE_APP_USERNAME"),
@@ -124,6 +138,10 @@ def require_login():
         st.error(
             "Login is not configured. Add username and password in "
             "Streamlit secrets before sharing this app."
+        )
+        st.info(
+            "Use either [auth] username/password or AUTH_USERNAME "
+            "and AUTH_PASSWORD in Streamlit secrets, then reboot the app."
         )
         st.stop()
 
