@@ -2,7 +2,9 @@ import streamlit as st
 import pandas as pd
 import os
 import hmac
+import re
 import time
+from collections import Counter
 from io import BytesIO
 from datetime import datetime
 import plotly.express as px
@@ -695,6 +697,379 @@ def create_monthly_analysis(df):
     )
 
 
+def first_existing_column(df, columns):
+    for column in columns:
+        if column in df.columns:
+            return column
+
+    return None
+
+
+def create_operator_performance_dashboard(df):
+    if df.empty:
+        return
+
+    operator_col = first_existing_column(
+        df,
+        [
+            'applicable_name',
+            'train_id',
+            'mode_of_operation',
+            'failure_dept'
+        ]
+    )
+
+    if not operator_col:
+        st.info("Operator performance needs operator or train ID columns.")
+        return
+
+    operator_df = df.copy()
+    operator_df[operator_col] = (
+        operator_df[operator_col]
+        .fillna("Unknown")
+        .astype(str)
+        .str.strip()
+        .replace("", "Unknown")
+    )
+
+    summary = (
+        operator_df
+        .groupby(operator_col)
+        .size()
+        .reset_index(name="failure_records")
+        .sort_values("failure_records", ascending=False)
+    )
+
+    affected_col = first_existing_column(df, ['affected'])
+
+    if affected_col:
+        affected_flags = (
+            operator_df[affected_col]
+            .fillna("")
+            .astype(str)
+            .str.lower()
+            .str.contains("yes|affected|true|1", regex=True)
+        )
+
+        affected_summary = (
+            operator_df.assign(train_affected=affected_flags)
+            .groupby(operator_col)["train_affected"]
+            .sum()
+            .reset_index(name="train_affected_records")
+        )
+
+        summary = summary.merge(
+            affected_summary,
+            on=operator_col,
+            how="left"
+        )
+
+        summary["affected_rate_%"] = (
+            summary["train_affected_records"]
+            / summary["failure_records"]
+            * 100
+        ).round(1)
+
+    st.subheader("Train Operator Performance")
+
+    p1, p2, p3 = st.columns(3)
+
+    with p1:
+        st.metric("Operators / Train IDs", summary[operator_col].nunique())
+
+    with p2:
+        st.metric("Failure Records", int(summary["failure_records"].sum()))
+
+    with p3:
+        top_value = summary.iloc[0][operator_col] if not summary.empty else "-"
+        st.metric("Highest Records", top_value)
+
+    top_summary = summary.head(15)
+
+    fig = px.bar(
+        top_summary,
+        x=operator_col,
+        y="failure_records",
+        title="Top Operator / Train Failure Records",
+        labels={
+            operator_col: "Operator / Train",
+            "failure_records": "Records"
+        }
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(summary, use_container_width=True)
+
+    category_col = first_existing_column(
+        df,
+        ['failure_category', 'failure_dept', 'mode_of_operation']
+    )
+
+    if category_col:
+        heatmap_data = (
+            operator_df
+            .groupby([operator_col, category_col])
+            .size()
+            .reset_index(name="records")
+        )
+
+        fig_heatmap = px.density_heatmap(
+            heatmap_data,
+            x=category_col,
+            y=operator_col,
+            z="records",
+            title="Operator / Train vs Failure Category"
+        )
+
+        st.plotly_chart(fig_heatmap, use_container_width=True)
+
+
+def read_text_files(uploaded_files):
+    text_parts = []
+
+    for uploaded_file in uploaded_files:
+        try:
+            text_parts.append(
+                uploaded_file.getvalue().decode("utf-8", errors="ignore")
+            )
+        except Exception:
+            text_parts.append("")
+
+    return "\n\n".join(text_parts)
+
+
+def split_sentences(text):
+    return [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", text)
+        if sentence.strip()
+    ]
+
+
+def extract_top_terms(text, limit=12):
+    stop_words = {
+        "about", "after", "again", "against", "also", "and", "are",
+        "because", "been", "before", "being", "between", "during",
+        "from", "have", "into", "that", "the", "their", "there",
+        "this", "through", "train", "with", "were", "which", "will",
+        "would", "operator", "failure", "statement", "report"
+    }
+
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", text.lower())
+    useful_words = [word for word in words if word not in stop_words]
+
+    return Counter(useful_words).most_common(limit)
+
+
+def sentences_matching(text, patterns, limit=8):
+    matches = []
+
+    for sentence in split_sentences(text):
+        lowered = sentence.lower()
+
+        if any(pattern in lowered for pattern in patterns):
+            matches.append(sentence)
+
+        if len(matches) >= limit:
+            break
+
+    return matches
+
+
+def build_dataframe_operations_summary(df):
+    if df.empty:
+        return "No failure data is currently selected."
+
+    lines = [
+        f"Selected records: {len(df)}",
+        f"Departments involved: {df['failure_dept'].nunique()}"
+        if 'failure_dept' in df.columns else "Departments involved: N/A",
+    ]
+
+    if 'failure_date' in df.columns:
+        dates = df['failure_date'].dropna()
+
+        if not dates.empty:
+            lines.append(
+                f"Period: {dates.min().date()} to {dates.max().date()}"
+            )
+
+    for column, label in [
+        ('failure_dept', 'Top departments'),
+        ('failure_category', 'Top categories'),
+        ('location', 'Top locations'),
+        ('mode_of_operation', 'Modes of operation'),
+        ('train_id', 'Train IDs')
+    ]:
+        if column in df.columns:
+            values = (
+                df[column]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .replace("", pd.NA)
+                .dropna()
+                .value_counts()
+                .head(5)
+            )
+
+            if not values.empty:
+                joined = ", ".join(
+                    f"{name} ({count})"
+                    for name, count in values.items()
+                )
+                lines.append(f"{label}: {joined}")
+
+    return "\n".join(lines)
+
+
+def build_incident_report(df, sections):
+    combined_text = "\n\n".join(
+        text for text in sections.values() if text.strip()
+    )
+
+    top_terms = extract_top_terms(combined_text)
+    root_cause_lines = sentences_matching(
+        combined_text,
+        ["cause", "reason", "failed", "mistake", "delay", "violation"]
+    )
+    risk_lines = sentences_matching(
+        combined_text,
+        ["risk", "unsafe", "danger", "signal", "speed", "emergency"]
+    )
+    improvement_lines = sentences_matching(
+        combined_text,
+        ["improve", "training", "briefing", "counselling", "monitor"]
+    )
+
+    report_lines = [
+        "# Train Operations Incident Analysis Report",
+        "",
+        f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "",
+        "## Data Summary",
+        build_dataframe_operations_summary(df),
+        "",
+        "## Statement And Evidence Summary",
+    ]
+
+    if combined_text.strip():
+        report_lines.extend([
+            f"Text length analyzed: {len(combined_text.split())} words",
+            "Key recurring terms: "
+            + ", ".join(f"{term} ({count})" for term, count in top_terms)
+            if top_terms else "Key recurring terms: N/A",
+        ])
+    else:
+        report_lines.append("No statement, transcript, or CCTV text entered.")
+
+    report_lines.extend(["", "## Possible Contributing Factors"])
+
+    if root_cause_lines:
+        report_lines.extend(f"- {line}" for line in root_cause_lines)
+    else:
+        report_lines.append("- Review operator action, communication, "
+                            "equipment status, and procedural compliance.")
+
+    report_lines.extend(["", "## Safety And Operational Risk Points"])
+
+    if risk_lines:
+        report_lines.extend(f"- {line}" for line in risk_lines)
+    else:
+        report_lines.append("- No explicit safety-risk wording was detected "
+                            "in the entered text.")
+
+    report_lines.extend(["", "## Improvement Recommendations"])
+
+    recommendations = [
+        "Conduct targeted counselling or refresher training for repeated "
+        "operator-related failure patterns.",
+        "Verify communication protocol compliance for incidents involving "
+        "delay, signal, speed, or emergency handling.",
+        "Compare statement timeline with CCTV observations and system logs.",
+        "Track repeat locations, train IDs, and modes of operation for "
+        "preventive action."
+    ]
+
+    report_lines.extend(f"- {item}" for item in recommendations)
+
+    if improvement_lines:
+        report_lines.extend(f"- Evidence note: {line}" for line in improvement_lines)
+
+    report_lines.extend([
+        "",
+        "## Final Incident Report Draft",
+        "Based on the available failure records, operator statements, "
+        "transcript notes, and CCTV observations, the incident should be "
+        "reviewed for immediate cause, contributing operational conditions, "
+        "procedure compliance, communication quality, and recurrence risk. "
+        "Final responsibility and corrective action should be confirmed after "
+        "management review of original evidence."
+    ])
+
+    return "\n".join(report_lines)
+
+
+def render_incident_analysis_workspace(df):
+    st.subheader("Statement, Transcript, CCTV And Incident Report")
+
+    statement_files = st.file_uploader(
+        "Upload statement/report text files",
+        type=["txt"],
+        accept_multiple_files=True,
+        key="statement_files"
+    )
+
+    transcript_files = st.file_uploader(
+        "Upload transcript text files",
+        type=["txt"],
+        accept_multiple_files=True,
+        key="transcript_files"
+    )
+
+    cctv_files = st.file_uploader(
+        "Upload CCTV observation text files",
+        type=["txt"],
+        accept_multiple_files=True,
+        key="cctv_files"
+    )
+
+    statement_text = st.text_area(
+        "Statements / train operator failure report",
+        value=read_text_files(statement_files),
+        height=180
+    )
+
+    transcript_text = st.text_area(
+        "Transcript analysis",
+        value=read_text_files(transcript_files),
+        height=160
+    )
+
+    cctv_text = st.text_area(
+        "CCTV analysis notes",
+        value=read_text_files(cctv_files),
+        height=160
+    )
+
+    sections = {
+        "statements": statement_text,
+        "transcripts": transcript_text,
+        "cctv": cctv_text,
+    }
+
+    report = build_incident_report(df, sections)
+
+    st.markdown(report)
+
+    st.download_button(
+        label="Download Incident Analysis Report",
+        data=report,
+        file_name="train_operations_incident_report.md",
+        mime="text/markdown"
+    )
+
+
 # =========================
 # MAIN APP
 # =========================
@@ -980,6 +1355,17 @@ def main():
                 filtered_df
             )
 
+            ops_tab, incident_tab = st.tabs([
+                "Operator Performance",
+                "Incident Analysis"
+            ])
+
+            with ops_tab:
+                create_operator_performance_dashboard(filtered_df)
+
+            with incident_tab:
+                render_incident_analysis_workspace(filtered_df)
+
             # =====================
             # DATA TABLE
             # =====================
@@ -1061,6 +1447,9 @@ def main():
         - Action Taken
         - Failure Category
         """)
+
+        st.header("Operations Incident Analysis")
+        render_incident_analysis_workspace(pd.DataFrame())
 
 
 # =========================
