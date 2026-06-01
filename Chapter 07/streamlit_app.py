@@ -4,6 +4,8 @@ import os
 import hmac
 import re
 import time
+import sqlite3
+import json
 from collections import Counter
 from io import BytesIO
 from datetime import datetime
@@ -22,6 +24,234 @@ st.set_page_config(
 LOCAL_UPLOAD_DIR = "uploads"
 GOOGLE_DRIVE_UPLOAD_FOLDER = "Failure Detection Uploads"
 GOOGLE_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+DATA_DB_PATH = "failure_detection_data.db"
+
+
+def init_database():
+    """Initialize SQLite database for persistent storage."""
+    conn = sqlite3.connect(DATA_DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS incident_workspace (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT UNIQUE,
+            statement_text TEXT,
+            transcript_text TEXT,
+            cctv_text TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS filter_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT UNIQUE,
+            dept_filter TEXT,
+            subsystem_filter TEXT,
+            search_term TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS incident_images (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            image_name TEXT,
+            image_data BLOB,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(session_id, image_name)
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+
+def get_session_id():
+    """Get or create a unique session ID for persistence."""
+    if 'persistent_session_id' not in st.session_state:
+        st.session_state.persistent_session_id = (
+            f"{datetime.now().strftime('%Y%m%d')}_"
+            f"{hash(str(st.session_state)) % 10000}"
+        )
+    return st.session_state.persistent_session_id
+
+
+def load_incident_workspace():
+    """Load saved incident workspace data from database."""
+    conn = sqlite3.connect(DATA_DB_PATH)
+    cursor = conn.cursor()
+    
+    session_id = get_session_id()
+    cursor.execute(
+        'SELECT statement_text, transcript_text, cctv_text '
+        'FROM incident_workspace WHERE session_id = ?',
+        (session_id,)
+    )
+    
+    result = cursor.fetchone()
+    conn.close()
+    
+    if result:
+        return {
+            'statement_text': result[0] or '',
+            'transcript_text': result[1] or '',
+            'cctv_text': result[2] or ''
+        }
+    
+    return {
+        'statement_text': '',
+        'transcript_text': '',
+        'cctv_text': ''
+    }
+
+
+def save_incident_workspace(statement_text, transcript_text, cctv_text):
+    """Save incident workspace data to database."""
+    conn = sqlite3.connect(DATA_DB_PATH)
+    cursor = conn.cursor()
+    
+    session_id = get_session_id()
+    cursor.execute(
+        '''
+        INSERT OR REPLACE INTO incident_workspace 
+        (session_id, statement_text, transcript_text, cctv_text, updated_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ''',
+        (session_id, statement_text, transcript_text, cctv_text)
+    )
+    
+    conn.commit()
+    conn.close()
+
+
+def load_filter_state():
+    """Load saved filter state from database."""
+    conn = sqlite3.connect(DATA_DB_PATH)
+    cursor = conn.cursor()
+    
+    session_id = get_session_id()
+    cursor.execute(
+        'SELECT dept_filter, subsystem_filter, search_term '
+        'FROM filter_state WHERE session_id = ?',
+        (session_id,)
+    )
+    
+    result = cursor.fetchone()
+    conn.close()
+    
+    if result:
+        return {
+            'dept_filter': json.loads(result[0]) if result[0] else [],
+            'subsystem_filter': json.loads(result[1]) if result[1] else [],
+            'search_term': result[2] or ''
+        }
+    
+    return {
+        'dept_filter': [],
+        'subsystem_filter': [],
+        'search_term': ''
+    }
+
+
+def save_filter_state(dept_filter, subsystem_filter, search_term):
+    """Save filter state to database."""
+    conn = sqlite3.connect(DATA_DB_PATH)
+    cursor = conn.cursor()
+    
+    session_id = get_session_id()
+    cursor.execute(
+        '''
+        INSERT OR REPLACE INTO filter_state 
+        (session_id, dept_filter, subsystem_filter, search_term, updated_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ''',
+        (
+            session_id,
+            json.dumps(dept_filter),
+            json.dumps(subsystem_filter),
+            search_term
+        )
+    )
+    
+    conn.commit()
+    conn.close()
+
+
+def save_incident_image(image_file):
+    """Save incident image to database."""
+    conn = sqlite3.connect(DATA_DB_PATH)
+    cursor = conn.cursor()
+    
+    session_id = get_session_id()
+    image_name = image_file.name
+    image_data = image_file.getbuffer().tobytes()
+    
+    cursor.execute(
+        '''
+        INSERT OR REPLACE INTO incident_images 
+        (session_id, image_name, image_data)
+        VALUES (?, ?, ?)
+        ''',
+        (session_id, image_name, image_data)
+    )
+    
+    conn.commit()
+    conn.close()
+
+
+def load_incident_images():
+    """Load all saved incident images from database."""
+    conn = sqlite3.connect(DATA_DB_PATH)
+    cursor = conn.cursor()
+    
+    session_id = get_session_id()
+    cursor.execute(
+        'SELECT image_name, image_data FROM incident_images WHERE session_id = ? ORDER BY created_at DESC',
+        (session_id,)
+    )
+    
+    results = cursor.fetchall()
+    conn.close()
+    
+    return results
+
+
+def delete_incident_image(image_name):
+    """Delete a specific incident image from database."""
+    conn = sqlite3.connect(DATA_DB_PATH)
+    cursor = conn.cursor()
+    
+    session_id = get_session_id()
+    cursor.execute(
+        'DELETE FROM incident_images WHERE session_id = ? AND image_name = ?',
+        (session_id, image_name)
+    )
+    
+    conn.commit()
+    conn.close()
+
+
+def delete_all_incident_images():
+    """Delete all incident images for current session."""
+    conn = sqlite3.connect(DATA_DB_PATH)
+    cursor = conn.cursor()
+    
+    session_id = get_session_id()
+    cursor.execute(
+        'DELETE FROM incident_images WHERE session_id = ?',
+        (session_id,)
+    )
+    
+    conn.commit()
+    conn.close()
+
+
+# Initialize database on app load
+init_database()
 
 
 def get_upload_dir():
@@ -431,6 +661,19 @@ def list_saved_files():
             saved_paths.append(os.path.join(UPLOAD_DIR, file_name))
 
     return sorted(saved_paths, key=os.path.getmtime, reverse=True)
+
+
+def delete_all_saved_files():
+    """Delete all saved Excel files."""
+    saved_paths = list_saved_files()
+    deleted_count = 0
+    
+    for path in saved_paths:
+        file_name = os.path.basename(path)
+        if delete_saved_file(file_name):
+            deleted_count += 1
+    
+    return deleted_count
 
 
 def delete_saved_file(file_name):
@@ -1010,8 +1253,35 @@ def build_incident_report(df, sections):
     return "\n".join(report_lines)
 
 
+def clear_incident_workspace():
+    """Clear all incident workspace data from database."""
+    conn = sqlite3.connect(DATA_DB_PATH)
+    cursor = conn.cursor()
+    
+    session_id = get_session_id()
+    cursor.execute(
+        'DELETE FROM incident_workspace WHERE session_id = ?',
+        (session_id,)
+    )
+    
+    conn.commit()
+    conn.close()
+
+
 def render_incident_analysis_workspace(df):
-    st.subheader("Statement, Transcript, CCTV And Incident Report")
+    col_title, col_delete = st.columns([0.9, 0.1])
+    
+    with col_title:
+        st.subheader("Statement, Transcript, CCTV And Incident Report")
+    
+    with col_delete:
+        st.write("")
+        st.write("")
+        if st.button("🗑️", help="Clear all incident workspace data", key="clear_workspace_btn"):
+            clear_incident_workspace()
+            delete_all_incident_images()
+            st.success("Workspace cleared!")
+            st.rerun()
 
     statement_files = st.file_uploader(
         "Upload statement/report text files",
@@ -1034,23 +1304,78 @@ def render_incident_analysis_workspace(df):
         key="cctv_files"
     )
 
+    # Image upload section
+    st.markdown("---")
+    st.subheader("📸 Statement Images for Analysis")
+    
+    image_files = st.file_uploader(
+        "Upload statement/evidence images (copy and paste screenshots)",
+        type=["jpg", "jpeg", "png", "gif", "bmp"],
+        accept_multiple_files=True,
+        key="incident_images_input"
+    )
+    
+    # Save uploaded images
+    if image_files:
+        for image_file in image_files:
+            save_incident_image(image_file)
+        st.success(f"Uploaded {len(image_files)} image(s)")
+    
+    # Display saved images
+    saved_images = load_incident_images()
+    
+    if saved_images:
+        st.write(f"**Saved Images ({len(saved_images)})**")
+        
+        # Create columns for image display
+        image_cols = st.columns(3)
+        col_idx = 0
+        
+        for image_name, image_data in saved_images:
+            with image_cols[col_idx % 3]:
+                st.image(image_data, caption=image_name, use_container_width=True)
+                
+                if st.button(
+                    "🗑️ Delete",
+                    key=f"delete_img_{image_name}",
+                    help=f"Delete {image_name}"
+                ):
+                    delete_incident_image(image_name)
+                    st.success(f"Deleted {image_name}")
+                    st.rerun()
+            
+            col_idx += 1
+
+    # Load saved workspace data
+    saved_workspace = load_incident_workspace()
+
+    st.markdown("---")
+    st.subheader("📝 Analysis Notes")
+
     statement_text = st.text_area(
         "Statements / train operator failure report",
-        value=read_text_files(statement_files),
-        height=180
+        value=read_text_files(statement_files) or saved_workspace['statement_text'],
+        height=180,
+        key="statement_text_input"
     )
 
     transcript_text = st.text_area(
         "Transcript analysis",
-        value=read_text_files(transcript_files),
-        height=160
+        value=read_text_files(transcript_files) or saved_workspace['transcript_text'],
+        height=160,
+        key="transcript_text_input"
     )
 
     cctv_text = st.text_area(
         "CCTV analysis notes",
-        value=read_text_files(cctv_files),
-        height=160
+        value=read_text_files(cctv_files) or saved_workspace['cctv_text'],
+        height=160,
+        key="cctv_text_input"
     )
+
+    # Save workspace data on user input
+    if statement_text or transcript_text or cctv_text:
+        save_incident_workspace(statement_text, transcript_text, cctv_text)
 
     sections = {
         "statements": statement_text,
@@ -1117,6 +1442,7 @@ def main():
             for path in saved_paths
         ]
 
+        # Delete single file section
         col_delete_select, col_delete_button = st.columns([3, 1])
 
         with col_delete_select:
@@ -1140,6 +1466,19 @@ def main():
                     st.rerun()
                 else:
                     st.warning(f"Could not delete {file_to_delete}")
+
+        # Delete all files section
+        col_spacer, col_delete_all = st.columns([3, 1])
+        
+        with col_delete_all:
+            if st.button(
+                "🗑️ Delete All",
+                type="secondary",
+                help="Delete all saved Excel files"
+            ):
+                deleted_count = delete_all_saved_files()
+                st.success(f"Deleted {deleted_count} file(s)")
+                st.rerun()
 
         selected_saved = st.multiselect(
             "Select saved files",
@@ -1246,6 +1585,9 @@ def main():
 
             st.header("🔍 Filters")
 
+            # Load saved filter state
+            saved_filters = load_filter_state()
+
             col1, col2, col3 = st.columns(3)
 
             with col1:
@@ -1254,7 +1596,9 @@ def main():
                     "Department",
                     options=combined_df[
                         'failure_dept'
-                    ].dropna().unique()
+                    ].dropna().unique(),
+                    default=saved_filters['dept_filter'],
+                    key="dept_filter_select"
                 )
 
             with col2:
@@ -1265,14 +1609,21 @@ def main():
                         'sub_system'
                     ].dropna().unique()
                     if 'sub_system'
-                    in combined_df.columns else []
+                    in combined_df.columns else [],
+                    default=saved_filters['subsystem_filter'],
+                    key="subsystem_filter_select"
                 )
 
             with col3:
 
                 search_term = st.text_input(
-                    "Search Description"
+                    "Search Description",
+                    value=saved_filters['search_term'],
+                    key="search_term_input"
                 )
+
+            # Save filter state
+            save_filter_state(dept_filter, subsystem_filter, search_term)
 
             filtered_df = combined_df.copy()
 
